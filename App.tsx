@@ -247,6 +247,7 @@ const AnimatedBone = ({
   // useAnimatedProps는 컴포넌트의 최상위 레벨에서 호출되어야 합니다.
   const animatedProps = useAnimatedProps(() => {
     const pose = poses.value[poseIndex];
+    // console.log('pose:::::2', pose);
     // 포즈가 없거나, 키포인트 신뢰도가 낮으면 렌더링하지 않습니다.
     if (!pose) return { display: 'none' };
 
@@ -309,7 +310,7 @@ const AnimatedKeypoint = ({
       display: 'flex',
     };
   });
-
+  // console.log('animatedProps', animatedProps);
   return <AnimatedCircle animatedProps={animatedProps} />;
 };
 
@@ -500,11 +501,15 @@ export default function App() {
         }
 
         console.log(`모델 로딩 경로: ${modelPath}`);
-        // 하드웨어 가속 옵션 추가(추가 테스트)
-        // const sessionOptions: InferenceSession.SessionOptions = {
-        //   executionProviders: ['CUDAExecutionProvider', 'CPUExecutionProvider'],
-        // };
-        const newSession = await InferenceSession.create(modelPath);
+        // iOS에서는 CoreML, Android에서는 NNAPI를 우선 사용하고, 지원되지 않을 경우 CPU를 사용합니다.
+        const sessionOptions: InferenceSession.SessionOptions = {
+          executionProviders:
+            Platform.OS === 'ios' ? ['coreml', 'cpu'] : ['nnapi', 'cpu'],
+        };
+        const newSession = await InferenceSession.create(
+          modelPath,
+          sessionOptions,
+        );
         setSession(newSession);
         console.log('ONNX 세션이 성공적으로 로드되었습니다.');
       } catch (e) {
@@ -548,7 +553,7 @@ export default function App() {
           console.log('processOutput:::실행');
           const poses = processOutput(outputTensor);
           // console.log('poses:::::', poses);
-          console.log('poses::::::');
+          // console.log('poses::::::', JSON.stringify(poses));
           detectedPoses.value = poses;
         } else {
           console.log(
@@ -580,7 +585,7 @@ export default function App() {
 
       // 2초에 한 번만 추론을 실행하도록 조절 (Throttling)
       const now = Date.now();
-      if (now - lastInferenceTime.current < 700) {
+      if (now - lastInferenceTime.current < 2000) {
         return;
       }
       // 실제 처리를 시작할 때 마지막 실행 시간을 기록합니다.
@@ -660,7 +665,10 @@ export default function App() {
   return (
     <View style={styles.container}>
       <Camera
-        style={StyleSheet.absoluteFill}
+        style={{
+          width: 600,
+          height: 480,
+        }}
         device={device}
         isActive={true}
         frameProcessor={frameProcessor}
@@ -668,13 +676,13 @@ export default function App() {
         pixelFormat="yuv"
         fps={15}
       />
-      {frameWidth > 0 && (
+      {/* {frameWidth > 0 && (
         <PoseOverlay
           poses={detectedPoses}
           frameWidth={frameWidth}
           frameHeight={frameHeight}
         />
-      )}
+      )} */}
       <View style={styles.infoBox}>
         <Text style={styles.infoText}>
           {session ? '✅ 모델 로드 완료' : '⌛ 모델 로딩 중...'}
