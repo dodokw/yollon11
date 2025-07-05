@@ -5512,6 +5512,11 @@ react-is@^19.1.0:
   resolved "https://registry.yarnpkg.com/react-is/-/react-is-19.1.0.tgz#805bce321546b7e14c084989c77022351bbdd11b"
   integrity sha512-Oe56aUPnkHyyDxxkvqtd7KkdQP5uIUfHxd5XTb3wE9d/kRnZLmKbDB0GWk919tdQ+mxxPtG6EAs6RMT6i1qtHg==
 
+react-native-fast-tflite@^1.6.1:
+  version "1.6.1"
+  resolved "https://registry.yarnpkg.com/react-native-fast-tflite/-/react-native-fast-tflite-1.6.1.tgz#799e2063bd9ad67dbe1dbd65d5165ade7b3a3464"
+  integrity sha512-qZpVLLtIDXRTnl4bavZAoAY0YbcghvU5Rok0rbJ3HSQptyfQCY9AG/mA/4Xjc29vybIWibvRd1hDbDR7HFXsTQ==
+
 react-native-fs@^2.20.0:
   version "2.20.0"
   resolved "https://registry.yarnpkg.com/react-native-fs/-/react-native-fs-2.20.0.tgz#05a9362b473bfc0910772c0acbb73a78dbc810f6"

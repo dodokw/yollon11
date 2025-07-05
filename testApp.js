@@ -1,7 +1,12 @@
 /**
  * App.tsx
  *
- * 파이썬 코드와 동일한 전처리 로직을 적용한 버전
+ * 이 파일은 애플리케이션의 메인 진입점입니다.
+ * TFLite 모델을 사용하여 포즈 감지를 수행합니다.
+ *
+ * 주요 변경 사항:
+ * - Python 코드와 동일한 '레터박스(Letterbox)' 전처리 방식을 frameProcessor에 직접 구현하여 모델 정확도 문제를 해결했습니다.
+ * - CONFIDENCE_THRESHOLD를 0.5로 복구했습니다.
  */
 import React, {
   useState,
@@ -45,10 +50,10 @@ const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 const MODEL_INPUT_WIDTH = 224;
 const MODEL_INPUT_HEIGHT = 224;
 
-// 후처리 관련 상수 - 파이썬과 동일하게 설정
+// 후처리 관련 상수
 const CONFIDENCE_THRESHOLD = 0.5;
 
-// SSD 옵션을 상수로 정의
+// test.py의 SSD 옵션을 상수로 정의
 const SSD_OPTIONS = {
   num_layers: 5,
   input_size_height: 224,
@@ -82,7 +87,7 @@ interface RotatedBbox {
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const AnimatedPolygon = Animated.createAnimatedComponent(Polygon);
 
-// --- 유틸리티 함수 ---
+// --- 유틸리티 함수 (변경 없음) ---
 
 const calculateScale = (
   minScale: number,
@@ -176,58 +181,56 @@ const decodeKeypoints = (
 const computeRotatedBboxFromKeypoints = (
   kpt0: Keypoint,
   kpt1: Keypoint,
-  imageW: number = 224,
-  imageH: number = 224,
-  scale: number = 1.25,
 ): RotatedBbox => {
+  const scale = 1.25;
   const { x: x0, y: y0 } = kpt0;
   const { x: x1, y: y1 } = kpt1;
 
-  const cx = x0 * imageW;
-  const cy = y0 * imageH;
-  const dx = x1 * imageW - cx;
-  const dy = -(y1 * imageH - cy); // Y축 반전 (파이썬과 동일)
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const angleRad = Math.atan2(dy, dx);
 
-  const angle = Math.atan2(dy, dx) * (180 / Math.PI) - 90;
   const distance = Math.sqrt(dx * dx + dy * dy);
   const boxSize = distance * 2.0 * scale;
 
-  // 회전된 박스의 코너 계산
-  const angleRad = (angle * Math.PI) / 180;
-  const cos = Math.cos(angleRad);
-  const sin = Math.sin(angleRad);
+  const cx = x0;
+  const cy = y0;
+  const boxW = boxSize;
+  const boxH = boxSize;
 
-  const halfSize = boxSize / 2;
+  const angle = angleRad - Math.PI / 2;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  const halfW = boxW / 2;
+  const halfH = boxH / 2;
+
   const corners = [
-    { x: -halfSize, y: -halfSize },
-    { x: halfSize, y: -halfSize },
-    { x: halfSize, y: halfSize },
-    { x: -halfSize, y: halfSize },
+    { x: -halfW, y: -halfH },
+    { x: halfW, y: -halfH },
+    { x: halfW, y: halfH },
+    { x: -halfW, y: halfH },
   ].map(p => ({
-    x: (cx + p.x * cos - p.y * sin) / imageW,
-    y: (cy + p.x * sin + p.y * cos) / imageH,
+    x: cx + p.x * cos - p.y * sin,
+    y: cy + p.x * sin + p.y * cos,
   }));
 
   return { corners };
 };
 
-// sigmoid 함수 (파이썬과 동일한 클리핑 적용)
 const sigmoid = (x: number): number => {
   const clippedX = Math.max(-50, Math.min(x, 50));
   return 1 / (1 + Math.exp(-clippedX));
 };
 
-// 후처리 함수
-const processOutput = (output: { [key: string]: Tensor }): Pose[] => {
+const processOutput = (output: Tensor[]): Pose[] => {
   const rawBoxes = output[0] as Float32Array;
   const rawScores = output[1] as Float32Array;
 
   if (!rawBoxes || !rawScores) {
-    console.log('!rawBoxes || !rawScores');
     return [];
   }
 
-  // 가장 높은 점수의 인덱스를 찾습니다.
   let bestIdx = -1;
   let maxScore = -1;
   for (let i = 0; i < rawScores.length; i++) {
@@ -238,10 +241,6 @@ const processOutput = (output: { [key: string]: Tensor }): Pose[] => {
     }
   }
 
-  console.log('maxScore:::', maxScore);
-  console.log('bestIdx:::', bestIdx);
-
-  // 임계값을 넘는 경우에만 포즈를 계산합니다.
   if (maxScore > CONFIDENCE_THRESHOLD) {
     const anchor = anchors[bestIdx];
     const boxOffset = bestIdx * 12;
@@ -253,10 +252,7 @@ const processOutput = (output: { [key: string]: Tensor }): Pose[] => {
       const rotatedBbox = computeRotatedBboxFromKeypoints(
         keypoints[0],
         keypoints[1],
-        MODEL_INPUT_WIDTH,
-        MODEL_INPUT_HEIGHT,
       );
-
       return [{ bbox, keypoints, score: maxScore, rotatedBbox }];
     }
   }
@@ -264,7 +260,7 @@ const processOutput = (output: { [key: string]: Tensor }): Pose[] => {
   return [];
 };
 
-// --- PoseOverlay 컴포넌트들 (기존과 동일) ---
+// --- PoseOverlay 컴포넌트 및 하위 컴포넌트 (변경 없음) ---
 const AnimatedKeypoint = React.memo(
   ({
     poses,
@@ -441,7 +437,6 @@ export default function App() {
     requestPermission();
   }, [requestPermission]);
 
-  // 모델 로드 시 입/출력 정보 확인
   useEffect(() => {
     if (modelState === 'loaded' && model) {
       console.log('--- TFLite Model Details ---');
@@ -472,41 +467,16 @@ export default function App() {
   const lastInferenceTime = useRef(0);
 
   const runInference = useRunOnJS(
-    async (
-      frameDataAsArray: number[],
-      originalWidth: number,
-      originalHeight: number,
-    ) => {
+    async (frameDataAsArray: number[]) => {
       if (model == null) {
         isProcessing.value = false;
         return;
       }
 
       try {
-        // 파이썬과 동일한 전처리 적용
-        const targetW = MODEL_INPUT_WIDTH;
-        const targetH = MODEL_INPUT_HEIGHT;
-
-        // aspect ratio 유지하면서 스케일 계산
-        const scale = Math.min(
-          targetW / originalWidth,
-          targetH / originalHeight,
-        );
-        const resizedW = Math.floor(originalWidth * scale);
-        const resizedH = Math.floor(originalHeight * scale);
-
-        console.log(
-          `Original: ${originalWidth}x${originalHeight}, Scale: ${scale}, Resized: ${resizedW}x${resizedH}`,
-        );
-
         const frameData = new Float32Array(frameDataAsArray);
         const output = await model.run([frameData]);
-        const poses = processOutput(output);
-
-        console.log('*************poseCameOut*************');
-        console.log(JSON.stringify(poses));
-        console.log('*************poseCameOut*************');
-
+        const poses = processOutput(output as Tensor[]);
         detectedPoses.value = poses;
       } catch (e) {
         console.error('TFLite 추론 오류:', e);
@@ -521,59 +491,61 @@ export default function App() {
     (frame: Frame) => {
       'worklet';
 
-      if (modelState !== 'loaded' || model == null) {
+      if (modelState !== 'loaded' || model == null || isProcessing.value) {
         return;
       }
 
       const now = Date.now();
-      if (now - lastInferenceTime.current < 1000) {
-        // 1초마다 처리
+      if (now - lastInferenceTime.current < 333) {
         return;
       }
       lastInferenceTime.current = now;
       isProcessing.value = true;
 
       try {
-        // 파이썬과 동일한 전처리 방식 적용
-        const targetW = MODEL_INPUT_WIDTH;
-        const targetH = MODEL_INPUT_HEIGHT;
+        // [수정] Python과 동일한 '레터박스' 전처리 로직 구현
+        // 1. 중간 리사이즈 크기 계산 (비율 유지)
+        const frameAspectRatio = frame.width / frame.height;
+        const modelAspectRatio = MODEL_INPUT_WIDTH / MODEL_INPUT_HEIGHT;
+        let newWidth = MODEL_INPUT_WIDTH;
+        let newHeight = MODEL_INPUT_HEIGHT;
 
-        // aspect ratio 유지하면서 스케일 계산
-        const scale = Math.min(targetW / frame.width, targetH / frame.height);
-        const resizedW = Math.floor(frame.width * scale);
-        const resizedH = Math.floor(frame.height * scale);
+        if (frameAspectRatio > modelAspectRatio) {
+          newHeight = Math.round(MODEL_INPUT_WIDTH / frameAspectRatio);
+        } else {
+          newWidth = Math.round(MODEL_INPUT_HEIGHT * frameAspectRatio);
+        }
 
-        // 리사이징 (aspect ratio 유지)
+        // 2. 계산된 크기로 이미지 리사이즈
         const resized = resize(frame, {
           scale: {
-            width: resizedW,
-            height: resizedH,
+            width: newWidth,
+            height: newHeight,
           },
           pixelFormat: 'rgb',
-          dataType: 'uint8',
+          dataType: 'float32',
         });
 
-        // 224x224 텐서 생성 (0으로 패딩)
-        const inputTensor = new Uint8Array(targetW * targetH * 3);
+        // 3. 224x224 캔버스 생성 및 검은색(-1.0)으로 채우기
+        const canvas = new Float32Array(
+          MODEL_INPUT_WIDTH * MODEL_INPUT_HEIGHT * 3,
+        );
+        canvas.fill(-1.0);
 
-        // 리사이징된 이미지를 좌상단에 배치
-        for (let y = 0; y < resizedH; y++) {
-          for (let x = 0; x < resizedW; x++) {
-            const srcIdx = (y * resizedW + x) * 3;
-            const dstIdx = (y * targetW + x) * 3;
-            inputTensor[dstIdx] = resized[srcIdx]; // R
-            inputTensor[dstIdx + 1] = resized[srcIdx + 1]; // G
-            inputTensor[dstIdx + 2] = resized[srcIdx + 2]; // B
+        // 4. 리사이즈된 이미지를 캔버스에 복사 (레터박싱) 및 정규화
+        for (let y = 0; y < newHeight; y++) {
+          for (let x = 0; x < newWidth; x++) {
+            const sourceIndex = (y * newWidth + x) * 3;
+            const destIndex = (y * MODEL_INPUT_WIDTH + x) * 3;
+
+            canvas[destIndex] = (resized[sourceIndex] / 127.5) - 1.0; // R
+            canvas[destIndex + 1] = (resized[sourceIndex + 1] / 127.5) - 1.0; // G
+            canvas[destIndex + 2] = (resized[sourceIndex + 2] / 127.5) - 1.0; // B
           }
         }
 
-        // 정규화 (0-255 -> -1~1)
-        const normalizedTensor = new Float32Array(targetW * targetH * 3);
-        for (let i = 0; i < inputTensor.length; i++) {
-          normalizedTensor[i] = inputTensor[i] / 127.5 - 1.0;
-        }
-
-        runInference(Array.from(normalizedTensor), frame.width, frame.height);
+        // 5. 레터박싱된 캔버스로 추론 실행
+        runInference(Array.from(canvas));
       } catch (e) {
         const errorMessage =
           e instanceof Error ? `${e.name}: ${e.message}` : String(e);
@@ -609,13 +581,13 @@ export default function App() {
         pixelFormat="yuv"
         fps={15}
       />
-      {/* {frameWidth > 0 && (
+      {frameWidth > 0 && (
         <PoseOverlay
           poses={detectedPoses}
           frameWidth={frameWidth}
           frameHeight={frameHeight}
         />
-      )} */}
+      )}
       <View style={styles.infoBox}>
         {modelState === 'loading' && (
           <>

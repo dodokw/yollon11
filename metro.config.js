@@ -13,7 +13,7 @@ const {
  */
 const config = {
   resolver: {
-    assetExts: [...assetExts.filter(ext => ext !== 'svg'), 'onnx'],
+    assetExts: [...assetExts.filter(ext => ext !== 'svg'), 'onnx', 'tflite'],
     sourceExts: [...sourceExts, 'svg'],
   },
 };
