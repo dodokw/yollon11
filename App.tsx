@@ -1,7 +1,7 @@
 /**
  * App.tsx
  *
- * 파이썬 코드와 동일한 전처리 로직을 적용한 버전
+ * PoseOverlay 노출 문제 해결 및 정밀도 개선 버전
  */
 import React, {
   useState,
@@ -76,6 +76,12 @@ interface Pose {
 
 interface RotatedBbox {
   corners: { x: number; y: number }[];
+}
+
+interface ProcessedOutput {
+  poses: Pose[];
+  bestIdx: number;
+  maxScore: number;
 }
 
 // Reanimated와 SVG를 연결하기 위한 컴포넌트 생성
@@ -166,8 +172,12 @@ const decodeKeypoints = (
 
   for (let i = 0; i < 4; i++) {
     const offset = boxOffset + 4 + i * 2;
-    const x = (rawBoxes[offset] / scale) * anchorW + anchorX;
-    const y = (rawBoxes[offset + 1] / scale) * anchorH + anchorY;
+    let x = (rawBoxes[offset] / scale) * anchorW + anchorX;
+    let y = (rawBoxes[offset + 1] / scale) * anchorH + anchorY;
+
+    x = Math.max(0, Math.min(1, x));
+    y = Math.max(0, Math.min(1, y));
+
     keypoints.push({ x, y });
   }
   return keypoints;
@@ -186,13 +196,12 @@ const computeRotatedBboxFromKeypoints = (
   const cx = x0 * imageW;
   const cy = y0 * imageH;
   const dx = x1 * imageW - cx;
-  const dy = -(y1 * imageH - cy); // Y축 반전 (파이썬과 동일)
+  const dy = -(y1 * imageH - cy);
 
   const angle = Math.atan2(dy, dx) * (180 / Math.PI) - 90;
   const distance = Math.sqrt(dx * dx + dy * dy);
   const boxSize = distance * 2.0 * scale;
 
-  // 회전된 박스의 코너 계산
   const angleRad = (angle * Math.PI) / 180;
   const cos = Math.cos(angleRad);
   const sin = Math.sin(angleRad);
@@ -211,23 +220,20 @@ const computeRotatedBboxFromKeypoints = (
   return { corners };
 };
 
-// sigmoid 함수 (파이썬과 동일한 클리핑 적용)
 const sigmoid = (x: number): number => {
   const clippedX = Math.max(-50, Math.min(x, 50));
   return 1 / (1 + Math.exp(-clippedX));
 };
 
-// 후처리 함수
-const processOutput = (output: { [key: string]: Tensor }): Pose[] => {
+const processOutput = (output: (Tensor | Float32Array)[]): ProcessedOutput => {
   const rawBoxes = output[0] as Float32Array;
   const rawScores = output[1] as Float32Array;
 
   if (!rawBoxes || !rawScores) {
     console.log('!rawBoxes || !rawScores');
-    return [];
+    return { poses: [], bestIdx: -1, maxScore: -1 };
   }
 
-  // 가장 높은 점수의 인덱스를 찾습니다.
   let bestIdx = -1;
   let maxScore = -1;
   for (let i = 0; i < rawScores.length; i++) {
@@ -238,10 +244,9 @@ const processOutput = (output: { [key: string]: Tensor }): Pose[] => {
     }
   }
 
-  console.log('maxScore:::', maxScore);
-  console.log('bestIdx:::', bestIdx);
+  // console.log('maxScore:::', maxScore);
+  // console.log('bestIdx:::', bestIdx);
 
-  // 임계값을 넘는 경우에만 포즈를 계산합니다.
   if (maxScore > CONFIDENCE_THRESHOLD) {
     const anchor = anchors[bestIdx];
     const boxOffset = bestIdx * 12;
@@ -257,174 +262,167 @@ const processOutput = (output: { [key: string]: Tensor }): Pose[] => {
         MODEL_INPUT_HEIGHT,
       );
 
-      return [{ bbox, keypoints, score: maxScore, rotatedBbox }];
+      return {
+        poses: [{ bbox, keypoints, score: maxScore, rotatedBbox }],
+        bestIdx,
+        maxScore,
+      };
     }
   }
 
-  return [];
+  return { poses: [], bestIdx, maxScore };
 };
 
-// --- PoseOverlay 컴포넌트들 (기존과 동일) ---
-const AnimatedKeypoint = React.memo(
-  ({
-    poses,
-    poseIndex,
-    keypointIndex,
-    scaleX,
-    scaleY,
-    offsetX,
-    offsetY,
-  }: {
-    poses: Animated.SharedValue<Pose[]>;
-    poseIndex: number;
-    keypointIndex: number;
-    scaleX: number;
-    scaleY: number;
-    offsetX: number;
-    offsetY: number;
-  }) => {
-    const animatedProps = useAnimatedProps(() => {
-      const pose = poses.value[poseIndex];
-      if (!pose) return { display: 'none' };
+// --- Static Drawing Components ---
+// NOTE: For better code structure, these are defined before being used in PoseOverlay.
 
-      const keypoint = pose.keypoints[keypointIndex];
-      if (!keypoint) return { display: 'none' };
-      return {
-        cx: keypoint.x * scaleX + offsetX,
-        cy: keypoint.y * scaleY + offsetY,
-        r: 5,
-        fill: 'red',
-        display: 'flex',
-      };
-    });
-    return <AnimatedCircle animatedProps={animatedProps} />;
-  },
-);
+const StaticKeypoint = ({ x, y }: { x: number; y: number }) => {
+  return (
+    <Circle cx={x} cy={y} r={8} fill="red" stroke="white" strokeWidth={2} />
+  );
+};
 
-const AnimatedRotatedBox = React.memo(
-  ({
-    poses,
-    poseIndex,
-    scaleX,
-    scaleY,
-    offsetX,
-    offsetY,
-  }: {
-    poses: Animated.SharedValue<Pose[]>;
-    poseIndex: number;
-    scaleX: number;
-    scaleY: number;
-    offsetX: number;
-    offsetY: number;
-  }) => {
-    const animatedProps = useAnimatedProps(() => {
-      const pose = poses.value[poseIndex];
-      if (!pose || !pose.rotatedBbox) return { display: 'none' };
+const StaticRotatedBox = ({
+  corners,
+}: {
+  corners: { x: number; y: number }[];
+}) => {
+  const points = corners.map(p => `${p.x},${p.y}`).join(' ');
 
-      const points = pose.rotatedBbox.corners
-        .map(p => `${p.x * scaleX + offsetX},${p.y * scaleY + offsetY}`)
-        .join(' ');
+  return (
+    <Polygon points={points} fill="none" stroke="orange" strokeWidth={3} />
+  );
+};
 
-      return { points, display: 'flex' };
-    });
+const StaticBoundingBox = ({
+  bbox,
+}: {
+  bbox: { xmin: number; ymin: number; xmax: number; ymax: number };
+}) => {
+  const { xmin, ymin, xmax, ymax } = bbox;
+  return (
+    <Polygon
+      points={`${xmin},${ymin} ${xmax},${ymin} ${xmax},${ymax} ${xmin},${ymax}`}
+      fill="none"
+      stroke="blue"
+      strokeWidth={2}
+    />
+  );
+};
 
-    return (
-      <AnimatedPolygon
-        animatedProps={animatedProps}
-        fill="none"
-        stroke="orange"
-        strokeWidth="2"
-      />
-    );
-  },
-);
-
-const SinglePose = React.memo(
-  ({
-    poses,
-    poseIndex,
-    scaleX,
-    scaleY,
-    offsetX,
-    offsetY,
-  }: {
-    poses: Animated.SharedValue<Pose[]>;
-    poseIndex: number;
-    scaleX: number;
-    scaleY: number;
-    offsetX: number;
-    offsetY: number;
-  }) => {
-    return (
-      <React.Fragment>
-        {Array.from({ length: 4 }).map((_, keypointIndex) => (
-          <AnimatedKeypoint
-            key={`kp-${poseIndex}-${keypointIndex}`}
-            poses={poses}
-            poseIndex={poseIndex}
-            keypointIndex={keypointIndex}
-            scaleX={scaleX}
-            scaleY={scaleY}
-            offsetX={offsetX}
-            offsetY={offsetY}
-          />
-        ))}
-        <AnimatedRotatedBox
-          poses={poses}
-          poseIndex={poseIndex}
-          scaleX={scaleX}
-          scaleY={scaleY}
-          offsetX={offsetX}
-          offsetY={offsetY}
-        />
-      </React.Fragment>
-    );
-  },
-);
-
+// [수정됨] PoseOverlay 컴포넌트
 const PoseOverlay = ({
   poses,
   frameWidth,
   frameHeight,
 }: {
-  poses: Animated.SharedValue<Pose[]>;
+  poses: Pose[];
   frameWidth: number;
   frameHeight: number;
 }) => {
+  // 프레임 크기가 유효하지 않으면 렌더링하지 않음 (0으로 나누기 방지)
+  if (!frameWidth || !frameHeight) {
+    return null;
+  }
+
+  // 1. 화면 표시 영역 계산 ('contain' 모드)
+  // 카메라 프레임이 화면에 어떻게 표시되는지 계산합니다.
   const screenAspectRatio = screenWidth / screenHeight;
   const frameAspectRatio = frameWidth / frameHeight;
 
-  let offsetX = 0;
-  let offsetY = 0;
-  let previewWidth = screenWidth;
-  let previewHeight = screenHeight;
-
+  let displayWidth, displayHeight, offsetX, offsetY;
   if (frameAspectRatio > screenAspectRatio) {
-    previewWidth = screenHeight * frameAspectRatio;
-    offsetX = (screenWidth - previewWidth) / 2;
+    // 프레임이 화면보다 넓은 경우 (레터박스)
+    displayWidth = screenWidth;
+    displayHeight = screenWidth / frameAspectRatio;
+    offsetX = 0;
+    offsetY = (screenHeight - displayHeight) / 2;
   } else {
-    previewHeight = screenWidth / frameAspectRatio;
-    offsetY = (screenHeight - previewHeight) / 2;
+    // 프레임이 화면보다 높은 경우 (필러박스)
+    displayWidth = screenHeight * frameAspectRatio;
+    displayHeight = screenHeight;
+    offsetX = (screenWidth - displayWidth) / 2;
+    offsetY = 0;
   }
 
-  const scaleX = previewWidth / MODEL_INPUT_WIDTH;
-  const scaleY = previewHeight / MODEL_INPUT_HEIGHT;
+  // 2. 전처리 보정 계수 계산
+  // 모델 입력(정사각형)에 맞추기 위해 프레임에 적용된 레터박싱/필러박싱을 보정합니다.
+  const modelAspectRatio = MODEL_INPUT_WIDTH / MODEL_INPUT_HEIGHT; // 1.0
+
+  let correctionX = 1;
+  let correctionY = 1;
+  if (frameAspectRatio > modelAspectRatio) {
+    // 원본 프레임이 모델 입력보다 넓음 -> Y축 좌표가 압축됨
+    correctionY = frameAspectRatio / modelAspectRatio;
+  } else {
+    // 원본 프레임이 모델 입력보다 높음 -> X축 좌표가 압축됨
+    correctionX = modelAspectRatio / frameAspectRatio;
+  }
+
+  // console.log('PoseOverlay 렌더링:', {
+  //   posesLength: poses.length,
+  //   displayWidth,
+  //   displayHeight,
+  //   offsetX,
+  //   offsetY,
+  //   correctionX,
+  //   correctionY,
+  // });
+
+  if (poses.length === 0) {
+    return null;
+  }
+
+  // 3. 좌표 변환 함수
+  // 모델 좌표를 화면 좌표로 변환합니다.
+  const transformX = (x: number) => x * correctionX * displayWidth + offsetX;
+  const transformY = (y: number) => y * correctionY * displayHeight + offsetY;
 
   return (
-    <Svg
-      width={screenWidth}
-      height={screenHeight}
-      style={StyleSheet.absoluteFill}
-    >
-      <SinglePose
-        poses={poses}
-        poseIndex={0}
-        scaleX={scaleX}
-        scaleY={scaleY}
-        offsetX={offsetX}
-        offsetY={offsetY}
-      />
-    </Svg>
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <Svg
+        width={screenWidth}
+        height={screenHeight}
+        style={StyleSheet.absoluteFill}
+      >
+        {poses.map((pose, poseIndex) => (
+          <React.Fragment key={`pose-${poseIndex}`}>
+            {/* 키포인트 렌더링 */}
+            {pose.keypoints.map((keypoint, keypointIndex) => {
+              const screenX = transformX(keypoint.x);
+              const screenY = transformY(keypoint.y);
+              return (
+                <StaticKeypoint
+                  key={`kp-${poseIndex}-${keypointIndex}`}
+                  x={screenX}
+                  y={screenY}
+                />
+              );
+            })}
+
+            {/* 바운딩 박스 렌더링 */}
+            <StaticBoundingBox
+              bbox={{
+                xmin: transformX(pose.bbox.xmin),
+                ymin: transformY(pose.bbox.ymin),
+                xmax: transformX(pose.bbox.xmax),
+                ymax: transformY(pose.bbox.ymax),
+              }}
+            />
+
+            {/* 회전된 박스 렌더링 */}
+            {pose.rotatedBbox && (
+              <StaticRotatedBox
+                corners={pose.rotatedBbox.corners.map(corner => ({
+                  x: transformX(corner.x),
+                  y: transformY(corner.y),
+                }))}
+              />
+            )}
+          </React.Fragment>
+        ))}
+      </Svg>
+    </View>
   );
 };
 
@@ -432,8 +430,16 @@ export default function App() {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('front');
   const { resize } = useResizePlugin();
-  const [timer, setTimer] = useState<number>(0); //ms
-  const [modelRunTime, setModelRunTime] = useState<number>(0); //ms
+  const [timer, setTimer] = useState<number>(0);
+  const [modelRunTime, setModelRunTime] = useState<number>(0);
+  const [preProcessTime, setPreProcessTime] = useState<number>(0);
+  const [postProcessTime, setPostProcessTime] = useState<number>(0);
+  const [commTime, setCommTime] = useState<number>(0);
+  const [bestIdx, setBestIdx] = useState<number>(-1);
+  const [maxScore, setMaxScore] = useState<number>(-1);
+
+  // SharedValue 대신 일반 state 사용
+  const [detectedPoses, setDetectedPoses] = useState<Pose[]>([]);
 
   const { state: modelState, model } = useTensorflowModel(
     require('./assets/pose_detection.tflite'),
@@ -443,7 +449,6 @@ export default function App() {
     requestPermission();
   }, [requestPermission]);
 
-  // 모델 로드 시 입/출력 정보 확인
   useEffect(() => {
     if (modelState === 'loaded' && model) {
       console.log('--- TFLite Model Details ---');
@@ -469,7 +474,6 @@ export default function App() {
   const frameWidth = format?.videoWidth ?? 0;
   const frameHeight = format?.videoHeight ?? 0;
 
-  const detectedPoses = useSharedValue<Pose[]>([]);
   const isProcessing = useSharedValue(false);
   const lastInferenceTime = useRef(0);
 
@@ -479,28 +483,18 @@ export default function App() {
       originalWidth: number,
       originalHeight: number,
       startTime: number,
+      preProcessEndTime: number,
     ) => {
+      const jsThreadStartTime = Date.now();
       if (model == null) {
         isProcessing.value = false;
         return;
       }
 
       try {
-        // 파이썬과 동일한 전처리 적용
-        const targetW = MODEL_INPUT_WIDTH;
-        const targetH = MODEL_INPUT_HEIGHT;
-
-        // aspect ratio 유지하면서 스케일 계산
-        const scale = Math.min(
-          targetW / originalWidth,
-          targetH / originalHeight,
-        );
-        const resizedW = Math.floor(originalWidth * scale);
-        const resizedH = Math.floor(originalHeight * scale);
-
-        console.log(
-          `Original: ${originalWidth}x${originalHeight}, Scale: ${scale}, Resized: ${resizedW}x${resizedH}`,
-        );
+        // 워크릿 종료 시점과 JS 스레드 시작 시점의 차이를 계산
+        setCommTime(jsThreadStartTime - preProcessEndTime);
+        setPreProcessTime(preProcessEndTime - startTime);
 
         const frameData = new Float32Array(frameDataAsArray);
 
@@ -509,16 +503,25 @@ export default function App() {
         const modelEndTime = Date.now();
         setModelRunTime(modelEndTime - modelStartTime);
 
-        const poses = processOutput(output);
+        const postProcessStartTime = modelEndTime;
+        const {
+          poses,
+          bestIdx: newBestIdx,
+          maxScore: newMaxScore,
+        } = processOutput(output);
+        const postProcessEndTime = Date.now();
+        setPostProcessTime(postProcessEndTime - postProcessStartTime);
 
-        const endTime = Date.now();
-        setTimer(endTime - startTime);
+        setTimer(postProcessEndTime - startTime);
 
-        console.log('*************poseCameOut*************');
-        console.log(JSON.stringify(poses));
-        console.log('*************poseCameOut*************');
+        // console.log('*************poseCameOut*************');
+        // console.log(JSON.stringify(poses));
+        // console.log('*************poseCameOut*************');
 
-        detectedPoses.value = poses;
+        // SharedValue 대신 setState 사용
+        setDetectedPoses(poses);
+        setBestIdx(newBestIdx);
+        setMaxScore(newMaxScore);
       } catch (e) {
         console.error('TFLite 추론 오류:', e);
       } finally {
@@ -538,7 +541,7 @@ export default function App() {
 
       const now = Date.now();
       if (now - lastInferenceTime.current < 1000) {
-        // 1초마다 처리
+        // 1초마다 처리로 변경
         return;
       }
       lastInferenceTime.current = now;
@@ -546,16 +549,13 @@ export default function App() {
 
       try {
         const startTime = Date.now();
-        // 파이썬과 동일한 전처리 방식 적용
         const targetW = MODEL_INPUT_WIDTH;
         const targetH = MODEL_INPUT_HEIGHT;
 
-        // aspect ratio 유지하면서 스케일 계산
         const scale = Math.min(targetW / frame.width, targetH / frame.height);
         const resizedW = Math.floor(frame.width * scale);
         const resizedH = Math.floor(frame.height * scale);
 
-        // 리사이징 (aspect ratio 유지)
         const resized = resize(frame, {
           scale: {
             width: resizedW,
@@ -565,31 +565,31 @@ export default function App() {
           dataType: 'uint8',
         });
 
-        // 224x224 텐서 생성 (0으로 패딩)
         const inputTensor = new Uint8Array(targetW * targetH * 3);
 
-        // 리사이징된 이미지를 좌상단에 배치
         for (let y = 0; y < resizedH; y++) {
           for (let x = 0; x < resizedW; x++) {
             const srcIdx = (y * resizedW + x) * 3;
             const dstIdx = (y * targetW + x) * 3;
-            inputTensor[dstIdx] = resized[srcIdx]; // R
-            inputTensor[dstIdx + 1] = resized[srcIdx + 1]; // G
-            inputTensor[dstIdx + 2] = resized[srcIdx + 2]; // B
+            inputTensor[dstIdx] = resized[srcIdx];
+            inputTensor[dstIdx + 1] = resized[srcIdx + 1];
+            inputTensor[dstIdx + 2] = resized[srcIdx + 2];
           }
         }
 
-        // 정규화 (0-255 -> -1~1)
         const normalizedTensor = new Float32Array(targetW * targetH * 3);
         for (let i = 0; i < inputTensor.length; i++) {
           normalizedTensor[i] = inputTensor[i] / 127.5 - 1.0;
         }
+
+        const preProcessEndTime = Date.now();
 
         runInference(
           Array.from(normalizedTensor),
           frame.width,
           frame.height,
           startTime,
+          preProcessEndTime,
         );
       } catch (e) {
         const errorMessage =
@@ -626,34 +626,46 @@ export default function App() {
         pixelFormat="yuv"
         fps={15}
       />
-      {/* {frameWidth > 0 && (
-        <PoseOverlay
-          poses={detectedPoses}
-          frameWidth={frameWidth}
-          frameHeight={frameHeight}
-        />
-      )} */}
+
+      {/* 수정된 PoseOverlay 사용 */}
+      <PoseOverlay
+        poses={detectedPoses}
+        frameWidth={frameWidth}
+        frameHeight={frameHeight}
+      />
+
       <View style={styles.infoBox}>
         {modelState === 'loading' && (
           <>
             <ActivityIndicator size="small" color="white" />
-            <Text style={styles.infoText}>⌛ 모델 로딩 중...</Text>
+            <Text style={styles.infoText}>⌛ Model on Loading...</Text>
           </>
         )}
         {modelState === 'loaded' && (
-          <Text style={styles.infoText}>✅ 모델 로드 완료</Text>
+          <Text style={styles.infoText}>✅ Model Load</Text>
         )}
         {modelState === 'error' && (
-          <Text style={styles.infoText}>❌ 모델 로드 실패</Text>
+          <Text style={styles.infoText}>❌ Model Load</Text>
         )}
         <Text style={styles.infoText}>
           Frame: {frameWidth}x{frameHeight}
         </Text>
-        <Text style={styles.infoText}>
-          preprocessing Time: {timer - modelRunTime}ms
-        </Text>
-        <Text style={styles.infoText}>Model Inference: {modelRunTime}ms</Text>
         <Text style={styles.infoText}>Total Time: {timer}ms</Text>
+        <Text style={styles.infoText}>
+          - Pre-processing: {preProcessTime}ms
+        </Text>
+        <Text style={styles.infoText}>- Bridge & Queue: {commTime}ms</Text>
+        <Text style={styles.infoText}>- Model Inference: {modelRunTime}ms</Text>
+        <Text style={styles.infoText}>
+          - Post-processing: {postProcessTime}ms
+        </Text>
+        <Text style={styles.infoText}>
+          Detected Poses: {detectedPoses.length}
+        </Text>
+        <Text style={styles.infoText}>Best Index: {bestIdx}</Text>
+        <Text style={styles.infoText}>
+          Max Score: {maxScore > 0 ? maxScore.toFixed(4) : 'N/A'}
+        </Text>
       </View>
     </View>
   );
