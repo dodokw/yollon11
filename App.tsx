@@ -432,6 +432,8 @@ export default function App() {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('front');
   const { resize } = useResizePlugin();
+  const [timer, setTimer] = useState<number>(0); //ms
+  const [modelRunTime, setModelRunTime] = useState<number>(0); //ms
 
   const { state: modelState, model } = useTensorflowModel(
     require('./assets/pose_detection.tflite'),
@@ -476,6 +478,7 @@ export default function App() {
       frameDataAsArray: number[],
       originalWidth: number,
       originalHeight: number,
+      startTime: number,
     ) => {
       if (model == null) {
         isProcessing.value = false;
@@ -500,8 +503,16 @@ export default function App() {
         );
 
         const frameData = new Float32Array(frameDataAsArray);
+
+        const modelStartTime = Date.now();
         const output = await model.run([frameData]);
+        const modelEndTime = Date.now();
+        setModelRunTime(modelEndTime - modelStartTime);
+
         const poses = processOutput(output);
+
+        const endTime = Date.now();
+        setTimer(endTime - startTime);
 
         console.log('*************poseCameOut*************');
         console.log(JSON.stringify(poses));
@@ -534,6 +545,7 @@ export default function App() {
       isProcessing.value = true;
 
       try {
+        const startTime = Date.now();
         // 파이썬과 동일한 전처리 방식 적용
         const targetW = MODEL_INPUT_WIDTH;
         const targetH = MODEL_INPUT_HEIGHT;
@@ -573,7 +585,12 @@ export default function App() {
           normalizedTensor[i] = inputTensor[i] / 127.5 - 1.0;
         }
 
-        runInference(Array.from(normalizedTensor), frame.width, frame.height);
+        runInference(
+          Array.from(normalizedTensor),
+          frame.width,
+          frame.height,
+          startTime,
+        );
       } catch (e) {
         const errorMessage =
           e instanceof Error ? `${e.name}: ${e.message}` : String(e);
@@ -632,6 +649,11 @@ export default function App() {
         <Text style={styles.infoText}>
           Frame: {frameWidth}x{frameHeight}
         </Text>
+        <Text style={styles.infoText}>
+          preprocessing Time: {timer - modelRunTime}ms
+        </Text>
+        <Text style={styles.infoText}>Model Inference: {modelRunTime}ms</Text>
+        <Text style={styles.infoText}>Total Time: {timer}ms</Text>
       </View>
     </View>
   );
