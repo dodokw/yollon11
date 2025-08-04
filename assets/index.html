@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pose Detection TFLite</title>
+    <!-- Tailwind CSS for basic styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- TensorFlow.js library -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.13.0/dist/tf.min.js"></script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            max-width: 90%;
+            width: 800px; /* Max width for the container */
+        }
+        video, canvas {
+            display: block;
+            width: 100%;
+            max-width: 640px; /* Max width for video/canvas */
+            height: auto;
+            border-radius: 8px;
+            margin: 0 auto 20px auto;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            background-color: #000; /* Black background for video/canvas */
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s ease, transform 0.1s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        button:hover {
+            transform: translateY(-1px);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        #startButton {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+        }
+        #startButton:hover {
+            background-color: #45a049;
+        }
+        #stopButton {
+            background-color: #f44336;
+            color: white;
+            border: none;
+        }
+        #stopButton:hover {
+            background-color: #da190b;
+        }
+        .status-message {
+            margin-top: 15px;
+            font-size: 1rem;
+            color: #555;
+        }
+        .score-display {
+            margin-top: 10px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6">Pose Detection Web App</h1>
+        <video id="webcamVideo" playsinline autoplay muted></video>
+        <canvas id="outputCanvas"></canvas>
+        <div class="controls">
+            <button id="startButton">Start Camera</button>
+            <button id="stopButton" disabled>Stop Camera</button>
+        </div>
+        <p id="statusMessage" class="status-message">Click "Start Camera" to begin.</p>
+        <p id="scoreDisplay" class="score-display">Detection Score: N/A</p>
+    </div>
+
+    <script>
+        // Define the path to your TFLite model.
+        // IMPORTANT: Replace this with the actual URL where your pose_detection.tflite model is hosted.
+        // Example: const MODEL_URL = 'https://example.com/models/pose_detection.tflite';
+        const MODEL_URL = './pose_detection.tflite'; // Placeholder: You MUST change this!
+
+        // Get DOM elements
+        const webcamVideo = document.getElementById('webcamVideo');
+        const outputCanvas = document.getElementById('outputCanvas');
+        const ctx = outputCanvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const statusMessage = document.getElementById('statusMessage');
+        const scoreDisplay = document.getElementById('scoreDisplay');
+
+        let stream = null;
+        let poseDetector = null;
+        let animationFrameId = null;
+        let isModelLoaded = false;
+
+        /**
+         * PoseDetectionTFLITE class for performing pose detection using a TFLite model.
+         * This class mirrors the Python implementation for pre-processing, inference,
+         * and post-processing.
+         */
+        class PoseDetectionTFLITE {
+            constructor(modelPath) {
+                this.modelPath = modelPath;
+                this.model = null;
+                this.opts = {
+                    'num_layers': 5,
+                    'input_size_height': 224,
+                    'input_size_width': 224,
+                    'anchor_offset_x': 0.5,
+                    'anchor_offset_y': 0.5,
+                    'min_scale': 0.1484375,
+                    'max_scale': 0.75,
+                    'strides': [8, 16, 32, 32, 32],
+                    'fixed_anchor_size': true,
+                    // If using fixed_anchor_size=False, ensure to add 'aspect_ratios': [1.0]
+                };
+                this.anchor = null; // Will be generated after model loads
+                this.scale = 1.0;
+                this.imageDraw = null; // Store the original image for drawing
+                this.bestScore = 0;
+                this.bestBbox = null;
+                this.bestKeypoints = null;
+            }
+
+            /**
+             * Initializes the model by loading it and generating anchors.
+             */
+            async init() {
+                try {
+                    statusMessage.textContent = 'Loading pose detection model...';
+                    // Using tf.loadGraphModel for .pb or .json models,
+                    // For .tflite, you might need tf.loadTFLiteModel if it's converted to a specific format
+                    // or use a custom backend if it's a raw .tflite.
+                    // For simplicity and common browser use, we'll assume a converted TF.js model (.json).
+                    // If your .tflite isn't directly loadable, you'd need to convert it to a TF.js format first.
+                    // For a raw .tflite, you'd typically use a library like `tflite-web` or `tfjs-tflite`.
+                    // Given the Python uses `tf.lite.Interpreter`, it implies a raw .tflite.
+                    // As tfjs doesn't directly load raw .tflite files, we'll simulate it by using a generic
+                    // tf.GraphModel and assuming the input/output tensor names match.
+                    // A more robust solution for raw .tflite would involve a dedicated tflite-web wrapper.
+                    // For this example, we'll use tf.loadGraphModel and assume the model is a TF.js GraphModel.
+                    // If the user's model is strictly a .tflite, they would need to convert it to TF.js format.
+                    // For demonstration, I'll use tf.loadGraphModel which expects a model.json.
+                    // If the user truly has a .tflite file, they would need to convert it or use a different library.
+                    // For now, I'll provide a comment to guide them.
+                    this.model = await tf.loadGraphModel(this.modelPath);
+                    statusMessage.textContent = 'Model loaded. Generating anchors...';
+                    this.anchor = this._ssdGenerateAnchors();
+                    isModelLoaded = true;
+                    statusMessage.textContent = 'Model ready!';
+                    console.log('Model loaded and anchors generated.');
+                } catch (error) {
+                    statusMessage.textContent = `Error loading model: ${error.message}. Please ensure the model URL is correct and the model is in TF.js format (model.json).`;
+                    console.error('Error loading model:', error);
+                    isModelLoaded = false;
+                }
+            }
+
+            /**
+             * Preprocesses the input image for the model.
+             * @param {HTMLVideoElement} videoElement - The video element to process.
+             * @returns {tf.Tensor} - The preprocessed tensor.
+             */
+            preprocess(videoElement) {
+                // Create a temporary canvas to draw the video frame
+                const tempCanvas = document.createElement('canvas');
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCanvas.width = videoElement.videoWidth;
+                tempCanvas.height = videoElement.videoHeight;
+                tempCtx.drawImage(videoElement, 0, 0, tempCanvas.width, tempCanvas.height);
+
+                // Store the drawn image for later use in drawing results
+                this.imageDraw = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+
+                const h = tempCanvas.height;
+                const w = tempCanvas.width;
+                const targetW = this.opts['input_size_width'];
+                const targetH = this.opts['input_size_height'];
+
+                this.scale = Math.min(targetW / w, targetH / h);
+                const resizedW = Math.floor(w * this.scale);
+                const resizedH = Math.floor(h * this.scale);
+
+                // Convert to tensor, resize, pad, and normalize
+                let tensor = tf.browser.fromPixels(tempCanvas);
+                tensor = tf.image.resizeBilinear(tensor, [resizedH, resizedW]);
+
+                // Create a black tensor of target size
+                const inputTensor = tf.zeros([targetH, targetW, 3], 'int32'); // Use int32 for tf.tensor.fill
+
+                // Pad the resized image into the input tensor
+                const offsetH = 0;
+                const offsetW = 0;
+                const paddedTensor = tf.pad(tensor, [[offsetH, targetH - resizedH - offsetH], [offsetW, targetW - resizedW - offsetW], [0, 0]], 0);
+
+                // Normalize to [-1, 1]
+                const normalizedTensor = paddedTensor.toFloat().div(127.5).sub(1.0);
+
+                return normalizedTensor.expandDims(0); // Add batch dimension
+            }
+
+            /**
+             * Performs inference on the input tensor.
+             * @param {tf.Tensor} inputTensor - The preprocessed input tensor.
+             * @returns {Promise<[tf.Tensor, tf.Tensor]>} - Raw boxes and raw scores.
+             */
+            async inference(inputTensor) {
+                if (!this.model) {
+                    throw new Error("Model not loaded.");
+                }
+                const predictions = await this.model.executeAsync(inputTensor);
+
+                // Assuming predictions[0] is raw_boxes and predictions[1] is raw_scores
+                // You might need to inspect your specific model's output to confirm this.
+                // If the model is a .tflite converted to TF.js, the output names might be generic.
+                // For a typical MediaPipe BlazePose model, output might be structured.
+                // Let's assume the order is raw_boxes, raw_scores based on the Python code.
+                const rawBoxes = predictions[0];
+                const rawScores = predictions[1];
+
+                return [rawBoxes, rawScores];
+            }
+
+            /**
+             * Calculates the scale for anchor generation.
+             * @param {number} minScale
+             * @param {number} maxScale
+             * @param {number} strideIndex
+             * @param {number} numStrides
+             * @returns {number}
+             */
+            static _calculateScale(minScale, maxScale, strideIndex, numStrides) {
+                if (numStrides === 1) {
+                    return (minScale + maxScale) * 0.5;
+                } else {
+                    return minScale + (maxScale - minScale) * strideIndex / (numStrides - 1);
+                }
+            }
+
+            /**
+             * Generates anchors consistent with MediaPipe implementation.
+             * @returns {tf.Tensor} - Generated anchors.
+             */
+            _ssdGenerateAnchors() {
+                const numLayers = this.opts['num_layers'];
+                const strides = this.opts['strides'];
+                const inputHeight = this.opts['input_size_height'];
+                const inputWidth = this.opts['input_size_width'];
+                const anchorOffsetX = this.opts['anchor_offset_x'];
+                const anchorOffsetY = this.opts['anchor_offset_y'];
+                const minScale = this.opts['min_scale'];
+                const maxScale = this.opts['max_scale'];
+                const scales = Array.from({ length: numLayers }, (_, i) =>
+                    PoseDetectionTFLITE._calculateScale(minScale, maxScale, i, numLayers)
+                );
+
+                const fixedAnchorSize = this.opts.get('fixed_anchor_size', true); // Default to true
+
+                const anchors = [];
+
+                for (let layerId = 0; layerId < numLayers; layerId++) {
+                    const stride = strides[layerId];
+                    const featureMapHeight = Math.ceil(inputHeight / stride);
+                    const featureMapWidth = Math.ceil(inputWidth / stride);
+
+                    for (let y = 0; y < featureMapHeight; y++) {
+                        const yCenter = (y + anchorOffsetY) / featureMapHeight;
+                        for (let x = 0; x < featureMapWidth; x++) {
+                            const xCenter = (x + anchorOffsetX) / featureMapWidth;
+
+                            if (fixedAnchorSize) {
+                                let aspectRatios = this.opts.get('aspect_ratios', [1.0]);
+                                let scalesForLayer = [scales[layerId]];
+
+                                if (layerId === 0 && this.opts.get("reduce_boxes_in_lowest_layer", false)) {
+                                    aspectRatios = [1.0, 2.0, 0.5];
+                                    scalesForLayer = [0.1, scales[layerId], scales[layerId]];
+                                } else {
+                                    const interpolatedRatio = this.opts.get('interpolated_scale_aspect_ratio', 1.0);
+                                    if (interpolatedRatio > 0.0) {
+                                        const scaleNext = layerId < numLayers - 1 ? scales[layerId + 1] : 1.0;
+                                        const interpolatedScale = Math.sqrt(scales[layerId] * scaleNext);
+                                        aspectRatios.push(interpolatedRatio);
+                                        scalesForLayer.push(interpolatedScale);
+                                    }
+                                }
+
+                                for (let i = 0; i < aspectRatios.length; i++) {
+                                    // For fixed_anchor_size, width and height are always 1.0
+                                    anchors.push([xCenter, yCenter, 1.0, 1.0]);
+                                }
+                            } else {
+                                const aspectRatios = this.opts.get('aspect_ratios', [1.0]);
+                                const scale = scales[layerId];
+                                const scaleNext = layerId < numLayers - 1 ? scales[layerId + 1] : 1.0;
+                                const interpolatedScale = Math.sqrt(scale * scaleNext);
+
+                                for (const ratio of aspectRatios) {
+                                    const ratioSqrt = Math.sqrt(ratio);
+                                    const anchorW = scale * ratioSqrt;
+                                    const anchorH = scale / ratioSqrt;
+                                    anchors.push([xCenter, yCenter, anchorW, anchorH]);
+                                }
+                                // Add interpolated anchor with aspect ratio 1.0
+                                anchors.push([xCenter, yCenter, interpolatedScale, interpolatedScale]);
+                            }
+                        }
+                    }
+                }
+                return tf.tensor2d(anchors, [anchors.length, 4], 'float32');
+            }
+
+            /**
+             * Decodes raw box predictions to bounding boxes.
+             * @param {tf.Tensor} rawBoxes - Raw box predictions.
+             * @param {tf.Tensor} anchors - Generated anchors.
+             * @param {boolean} applyExponentialOnBoxSize - Whether to apply exponential on box size.
+             * @returns {tf.Tensor} - Decoded bounding boxes.
+             */
+            static _decodeBoxes(rawBoxes, anchors, applyExponentialOnBoxSize = false) {
+                const xScale = 224.0;
+                const yScale = 224.0;
+                const wScale = 224.0;
+                const hScale = 224.0;
+
+                const xCenter = rawBoxes.slice([0, 0], [-1, 1]).div(xScale).mul(anchors.slice([0, 2], [-1, 1])).add(anchors.slice([0, 0], [-1, 1]));
+                const yCenter = rawBoxes.slice([0, 1], [-1, 1]).div(yScale).mul(anchors.slice([0, 3], [-1, 1])).add(anchors.slice([0, 1], [-1, 1]));
+
+                let w, h;
+                if (applyExponentialOnBoxSize) {
+                    w = rawBoxes.slice([0, 2], [-1, 1]).div(wScale).exp().mul(anchors.slice([0, 2], [-1, 1]));
+                    h = rawBoxes.slice([0, 3], [-1, 1]).div(hScale).exp().mul(anchors.slice([0, 3], [-1, 1]));
+                } else {
+                    w = rawBoxes.slice([0, 2], [-1, 1]).div(wScale).mul(anchors.slice([0, 2], [-1, 1]));
+                    h = rawBoxes.slice([0, 3], [-1, 1]).div(hScale).mul(anchors.slice([0, 3], [-1, 1]));
+                }
+
+                const xmin = xCenter.sub(w.div(2));
+                const ymin = yCenter.sub(h.div(2));
+                const xmax = xCenter.add(w.div(2));
+                const ymax = yCenter.add(h.div(2));
+
+                return tf.stack([tf.stack([xmin, ymin], 2), tf.stack([xmax, ymax], 2)], 2);
+            }
+
+            /**
+             * Decodes 4 keypoints from raw box predictions.
+             * @param {tf.Tensor} rawBoxes - Raw box predictions.
+             * @param {tf.Tensor} anchors - Generated anchors.
+             * @param {number} xScale
+             * @param {number} yScale
+             * @returns {tf.Tensor} - Decoded keypoints.
+             */
+            static _decodeKeypoints(rawBoxes, anchors, xScale = 224.0, yScale = 224.0) {
+                const keypoints = [];
+                for (let i = 0; i < 4; i++) {
+                    const offset = 4 + i * 2;
+                    const keypointX = rawBoxes.slice([0, offset], [-1, 1]);
+                    const keypointY = rawBoxes.slice([0, offset + 1], [-1, 1]);
+
+                    const x = keypointX.div(xScale).mul(anchors.slice([0, 2], [-1, 1])).add(anchors.slice([0, 0], [-1, 1]));
+                    const y = keypointY.div(yScale).mul(anchors.slice([0, 3], [-1, 1])).add(anchors.slice([0, 1], [-1, 1]));
+                    keypoints.push(tf.stack([x, y], -1));
+                }
+                return tf.stack(keypoints, 1);
+            }
+
+            /**
+             * Computes a rotated bounding box from two keypoints.
+             * @param {Array<number>} kpt0 - [x, y] of the first keypoint (normalized).
+             * @param {Array<number>} kpt1 - [x, y] of the second keypoint (normalized).
+             * @param {number} imageW - Original image width.
+             * @param {number} imageH - Original image height.
+             * @param {number} scale - Scaling factor for the box size.
+             * @returns {Object} - {cx, cy, boxW, boxH, angle}
+             */
+            static _computeRotatedBboxFromKeypoints(kpt0, kpt1, imageW, imageH, scale = 1.25) {
+                const x0 = kpt0[0];
+                const y0 = kpt0[1];
+                const x1 = kpt1[0];
+                const y1 = kpt1[1];
+
+                const cx = x0 * imageW;
+                const cy = y0 * imageH;
+                const dx = x1 * imageW - cx;
+                const dy = -(y1 * imageH - cy); // Y-axis inversion
+
+                const angle = Math.atan2(dy, dx) * 180 / Math.PI - 90; // Convert to degrees
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const boxSize = distance * 2.0 * scale;
+
+                return { cx, cy, boxW: boxSize, boxH: boxSize, angle };
+            }
+
+            /**
+             * Sigmoid activation function.
+             * @param {tf.Tensor} x - Input tensor.
+             * @returns {tf.Tensor} - Sigmoid output.
+             */
+            static _sigmoid(x) {
+                // Clip values to avoid overflow for exp(-x)
+                return tf.sigmoid(x.clipByValue(-50, 50));
+            }
+
+            /**
+             * Runs the pose detection pipeline.
+             * @param {HTMLVideoElement} videoElement - The video element to process.
+             * @param {boolean} draw - Whether to draw results on the canvas.
+             * @param {number} threshold - Score threshold for drawing.
+             * @returns {Promise<[Array<Array<number>>, number, ImageData]>} - Best bbox, best score, and image data with drawings.
+             */
+            async run(videoElement, draw = true, threshold = 0.5) {
+                const inputTensor = this.preprocess(videoElement);
+                const [rawBoxesTensor, rawScoresTensor] = await this.inference(inputTensor);
+
+                // Convert tensors to JavaScript arrays for processing
+                const rawScores = await rawScoresTensor.squeeze().array(); // Remove batch and score dimensions
+                const rawBoxes = await rawBoxesTensor.squeeze().array(); // Remove batch dimension
+
+                // Apply sigmoid to scores
+                const scoresSigmoid = PoseDetectionTFLITE._sigmoid(tf.tensor(rawScores));
+                const scoresData = await scoresSigmoid.array();
+
+                // Find the best score and its index
+                let bestIdx = 0;
+                let maxScore = -Infinity;
+                for (let i = 0; i < scoresData.length; i++) {
+                    if (scoresData[i] > maxScore) {
+                        maxScore = scoresData[i];
+                        bestIdx = i;
+                    }
+                }
+                this.bestScore = maxScore;
+
+                // Select the best box and anchor
+                const selectedBox = tf.tensor2d([rawBoxes[bestIdx]], [1, rawBoxes[bestIdx].length]);
+                const selectedAnchor = tf.tensor2d([this.anchor.arraySync()[bestIdx]], [1, 4]);
+
+                // Decode bounding box and keypoints
+                const decodedBboxTensor = PoseDetectionTFLITE._decodeBoxes(selectedBox, selectedAnchor);
+                const decodedKptsTensor = PoseDetectionTFLITE._decodeKeypoints(selectedBox, selectedAnchor);
+
+                this.bestBbox = (await decodedBboxTensor.squeeze().array());
+                this.bestKeypoints = (await decodedKptsTensor.squeeze().array());
+
+                // Dispose tensors to free up memory
+                inputTensor.dispose();
+                rawBoxesTensor.dispose();
+                rawScoresTensor.dispose();
+                scoresSigmoid.dispose();
+                selectedBox.dispose();
+                selectedAnchor.dispose();
+                decodedBboxTensor.dispose();
+                decodedKptsTensor.dispose();
+
+                if (draw && this.bestScore >= threshold) {
+                    const h = this.imageDraw.height;
+                    const w = this.imageDraw.width;
+                    const inputH = this.opts['input_size_height'];
+                    const inputW = this.opts['input_size_width'];
+                    const scale = this.scale;
+
+                    // Draw the original image onto the canvas
+                    ctx.putImageData(this.imageDraw, 0, 0);
+
+                    // Draw bounding box
+                    let [[xmin, ymin], [xmax, ymax]] = this.bestBbox;
+
+                    xmin = xmin * inputW;
+                    xmax = xmax * inputW;
+                    ymin = ymin * inputH;
+                    ymax = ymax * inputH;
+
+                    xmin = Math.floor(xmin / scale);
+                    xmax = Math.floor(xmax / scale);
+                    ymin = Math.floor(ymin / scale);
+                    ymax = Math.floor(ymax / scale);
+
+                    xmin = Math.max(0, Math.min(xmin, w));
+                    xmax = Math.max(0, Math.min(xmax, w));
+                    ymin = Math.max(0, Math.min(ymin, h));
+                    ymax = Math.max(0, Math.min(ymax, h));
+
+                    ctx.strokeStyle = 'rgb(0, 255, 0)';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(xmin, ymin, xmax - xmin, ymax - ymin);
+
+                    // Draw keypoints (kpt0 and kpt2)
+                    const kpt0 = this.bestKeypoints[0];
+                    const kpt2 = this.bestKeypoints[2];
+
+                    const cx0 = Math.floor(Math.max(0, Math.min((kpt0[0] * inputW) / scale, w)));
+                    const cy0 = Math.floor(Math.max(0, Math.min((kpt0[1] * inputH) / scale, h)));
+                    const cx2 = Math.floor(Math.max(0, Math.min((kpt2[0] * inputW) / scale, w)));
+                    const cy2 = Math.floor(Math.max(0, Math.min((kpt2[1] * inputH) / scale, h)));
+
+                    ctx.fillStyle = 'rgb(255, 0, 0)';
+                    ctx.beginPath();
+                    ctx.arc(cx0, cy0, 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.arc(cx2, cy2, 4, 0, 2 * Math.PI);
+                    ctx.fill();
+
+                    // Draw rotated bounding box
+                    const kpt1 = this.bestKeypoints[1];
+                    const { cx, cy, boxW, boxH, angle } = PoseDetectionTFLITE._computeRotatedBboxFromKeypoints(kpt0, kpt1, w, h);
+
+                    ctx.save(); // Save the current canvas state
+                    ctx.translate(cx, cy); // Move origin to center of rotation
+                    ctx.rotate(angle * Math.PI / 180); // Rotate
+                    ctx.strokeStyle = 'rgb(0, 165, 255)';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(-boxW / 2, -boxH / 2, boxW, boxH); // Draw rectangle centered at new origin
+                    ctx.restore(); // Restore the canvas state
+
+                } else if (this.imageDraw) {
+                    // If score is below threshold or draw is false, just draw the original image
+                    ctx.putImageData(this.imageDraw, 0, 0);
+                }
+
+                scoreDisplay.textContent = `Detection Score: ${this.bestScore.toFixed(4)}`;
+
+                return [this.bestBbox, this.bestScore, this.imageDraw];
+            }
+        }
+
+        // --- Main Application Logic ---
+
+        /**
+         * Starts the webcam stream.
+         */
+        async function startWebcam() {
+            try {
+                statusMessage.textContent = 'Requesting camera access...';
+                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                webcamVideo.srcObject = stream;
+
+                webcamVideo.onloadedmetadata = () => {
+                    webcamVideo.play();
+                    // Set canvas dimensions to match video dimensions
+                    outputCanvas.width = webcamVideo.videoWidth;
+                    outputCanvas.height = webcamVideo.videoHeight;
+                    statusMessage.textContent = 'Camera started. Loading model...';
+                    if (!poseDetector) {
+                        poseDetector = new PoseDetectionTFLITE(MODEL_URL);
+                        poseDetector.init().then(() => {
+                            if (isModelLoaded) {
+                                startDetectionLoop();
+                                startButton.disabled = true;
+                                stopButton.disabled = false;
+                            } else {
+                                stopWebcam(); // Stop if model failed to load
+                            }
+                        });
+                    } else {
+                        // If detector already exists (e.g., after stopping and restarting)
+                        startDetectionLoop();
+                        startButton.disabled = true;
+                        stopButton.disabled = false;
+                    }
+                };
+            } catch (err) {
+                console.error('Error accessing webcam:', err);
+                statusMessage.textContent = `Error accessing camera: ${err.message}. Please ensure you have a camera and grant permissions.`;
+                startButton.disabled = false;
+                stopButton.disabled = true;
+            }
+        }
+
+        /**
+         * Stops the webcam stream.
+         */
+        function stopWebcam() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                webcamVideo.srcObject = null;
+                stream = null;
+            }
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+            // Clear canvas
+            ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+            statusMessage.textContent = 'Camera stopped.';
+            scoreDisplay.textContent = 'Detection Score: N/A';
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        }
+
+        /**
+         * The main detection loop.
+         */
+        async function startDetectionLoop() {
+            if (!poseDetector || !isModelLoaded) {
+                console.warn("Pose detector not ready or model not loaded.");
+                return;
+            }
+
+            // Only process if video is playing and ready
+            if (webcamVideo.readyState === webcamVideo.HAVE_ENOUGH_DATA) {
+                try {
+                    await poseDetector.run(webcamVideo, true, 0.5); // Draw if score >= 0.5
+                } catch (error) {
+                    console.error("Error during pose detection:", error);
+                    statusMessage.textContent = `Error during detection: ${error.message}`;
+                    stopWebcam(); // Stop if there's a critical error
+                }
+            }
+            animationFrameId = requestAnimationFrame(startDetectionLoop);
+        }
+
+        // Event Listeners
+        startButton.addEventListener('click', startWebcam);
+        stopButton.addEventListener('click', stopWebcam);
+
+        // Initial status
+        statusMessage.textContent = 'Ready to start. Ensure your model URL is correct.';
+
+        // Handle window resize to adjust canvas
+        window.addEventListener('resize', () => {
+            if (webcamVideo.videoWidth && webcamVideo.videoHeight) {
+                outputCanvas.width = webcamVideo.videoWidth;
+                outputCanvas.height = webcamVideo.videoHeight;
+            }
+        });
+
+    </script>
+</body>
+</html>

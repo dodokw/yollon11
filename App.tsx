@@ -1,7 +1,11 @@
 /**
  * App.tsx
  *
- * PoseOverlay 노출 문제 해결 및 정밀도 개선 버전
+ * 파이썬 코드와 일치하도록 수정된 버전
+ * 주요 수정사항:
+ * 1. 전처리 과정을 파이썬과 동일하게 수정
+ * 2. 좌표 변환 로직 개선
+ * 3. 스케일링 및 오프셋 계산 수정
  */
 import React, {
   useState,
@@ -82,6 +86,7 @@ interface ProcessedOutput {
   poses: Pose[];
   bestIdx: number;
   maxScore: number;
+  preprocessScale: number; // 전처리 스케일 추가
 }
 
 // Reanimated와 SVG를 연결하기 위한 컴포넌트 생성
@@ -175,9 +180,6 @@ const decodeKeypoints = (
     let x = (rawBoxes[offset] / scale) * anchorW + anchorX;
     let y = (rawBoxes[offset + 1] / scale) * anchorH + anchorY;
 
-    x = Math.max(0, Math.min(1, x));
-    y = Math.max(0, Math.min(1, y));
-
     keypoints.push({ x, y });
   }
   return keypoints;
@@ -196,17 +198,17 @@ const computeRotatedBboxFromKeypoints = (
   const cx = x0 * imageW;
   const cy = y0 * imageH;
   const dx = x1 * imageW - cx;
-  const dy = -(y1 * imageH - cy);
+  const dy = -(y1 * imageH - cy); // Y축 반전 (파이썬과 동일)
 
   const angle = Math.atan2(dy, dx) * (180 / Math.PI) - 90;
   const distance = Math.sqrt(dx * dx + dy * dy);
-  const boxSize = distance * 2.0 * scale;
+  const boxSize = distance * 2.0 * scale; // 파이썬과 동일하게 2.0 사용
 
   const angleRad = (angle * Math.PI) / 180;
   const cos = Math.cos(angleRad);
   const sin = Math.sin(angleRad);
 
-  const halfSize = boxSize / 2;
+  const halfSize = boxSize / 3;
   const corners = [
     { x: -halfSize, y: -halfSize },
     { x: halfSize, y: -halfSize },
@@ -225,13 +227,40 @@ const sigmoid = (x: number): number => {
   return 1 / (1 + Math.exp(-clippedX));
 };
 
-const processOutput = (output: (Tensor | Float32Array)[]): ProcessedOutput => {
+const processOutput = (
+  output: (Tensor | Float32Array)[],
+  preprocessScale: number,
+): ProcessedOutput => {
+  // 출력 검증 추가
+  if (!output || !Array.isArray(output) || output.length < 2) {
+    console.log('Invalid output format:', output);
+    return { poses: [], bestIdx: -1, maxScore: -1, preprocessScale };
+  }
+
   const rawBoxes = output[0] as Float32Array;
   const rawScores = output[1] as Float32Array;
 
-  if (!rawBoxes || !rawScores) {
-    console.log('!rawBoxes || !rawScores');
-    return { poses: [], bestIdx: -1, maxScore: -1 };
+  // 더 엄격한 검증
+  if (
+    !rawBoxes ||
+    !rawScores ||
+    !(rawBoxes instanceof Float32Array) ||
+    !(rawScores instanceof Float32Array)
+  ) {
+    console.log('Invalid tensor types:', {
+      rawBoxes: rawBoxes?.constructor?.name,
+      rawScores: rawScores?.constructor?.name,
+    });
+    return { poses: [], bestIdx: -1, maxScore: -1, preprocessScale };
+  }
+
+  // 길이 검증
+  if (rawBoxes.length === 0 || rawScores.length === 0) {
+    console.log('Empty tensors:', {
+      rawBoxesLength: rawBoxes.length,
+      rawScoresLength: rawScores.length,
+    });
+    return { poses: [], bestIdx: -1, maxScore: -1, preprocessScale };
   }
 
   let bestIdx = -1;
@@ -243,9 +272,6 @@ const processOutput = (output: (Tensor | Float32Array)[]): ProcessedOutput => {
       bestIdx = i;
     }
   }
-
-  // console.log('maxScore:::', maxScore);
-  // console.log('bestIdx:::', bestIdx);
 
   if (maxScore > CONFIDENCE_THRESHOLD) {
     const anchor = anchors[bestIdx];
@@ -266,15 +292,15 @@ const processOutput = (output: (Tensor | Float32Array)[]): ProcessedOutput => {
         poses: [{ bbox, keypoints, score: maxScore, rotatedBbox }],
         bestIdx,
         maxScore,
+        preprocessScale,
       };
     }
   }
 
-  return { poses: [], bestIdx, maxScore };
+  return { poses: [], bestIdx, maxScore, preprocessScale };
 };
 
 // --- Static Drawing Components ---
-// NOTE: For better code structure, these are defined before being used in PoseOverlay.
 
 const StaticKeypoint = ({ x, y }: { x: number; y: number }) => {
   return (
@@ -310,73 +336,60 @@ const StaticBoundingBox = ({
   );
 };
 
-// [수정됨] PoseOverlay 컴포넌트
+// [수정됨] PoseOverlay 컴포넌트 - 파이썬과 동일한 좌표 변환 로직
 const PoseOverlay = ({
   poses,
   frameWidth,
   frameHeight,
+  preprocessScale,
 }: {
   poses: Pose[];
   frameWidth: number;
   frameHeight: number;
+  preprocessScale: number;
 }) => {
-  // 프레임 크기가 유효하지 않으면 렌더링하지 않음 (0으로 나누기 방지)
-  if (!frameWidth || !frameHeight) {
+  if (!frameWidth || !frameHeight || poses.length === 0) {
     return null;
   }
 
-  // 1. 화면 표시 영역 계산 ('contain' 모드)
-  // 카메라 프레임이 화면에 어떻게 표시되는지 계산합니다.
-  const screenAspectRatio = screenWidth / screenHeight;
-  const frameAspectRatio = frameWidth / frameHeight;
+  // 파이썬의 좌표 변환 로직과 동일하게 구현
+  const transformCoordinates = (
+    x: number,
+    y: number,
+    isKeypoint: boolean = false,
+  ) => {
+    // 1. 정규화된 좌표를 모델 입력 크기로 변환
+    let modelX = x * MODEL_INPUT_WIDTH;
+    let modelY = y * MODEL_INPUT_HEIGHT;
 
-  let displayWidth, displayHeight, offsetX, offsetY;
-  if (frameAspectRatio > screenAspectRatio) {
-    // 프레임이 화면보다 넓은 경우 (레터박스)
-    displayWidth = screenWidth;
-    displayHeight = screenWidth / frameAspectRatio;
-    offsetX = 0;
-    offsetY = (screenHeight - displayHeight) / 2;
-  } else {
-    // 프레임이 화면보다 높은 경우 (필러박스)
-    displayWidth = screenHeight * frameAspectRatio;
-    displayHeight = screenHeight;
-    offsetX = (screenWidth - displayWidth) / 2;
-    offsetY = 0;
-  }
+    // 2. 전처리 스케일 역변환
+    modelX = modelX / preprocessScale;
+    modelY = modelY / preprocessScale;
 
-  // 2. 전처리 보정 계수 계산
-  // 모델 입력(정사각형)에 맞추기 위해 프레임에 적용된 레터박싱/필러박싱을 보정합니다.
-  const modelAspectRatio = MODEL_INPUT_WIDTH / MODEL_INPUT_HEIGHT; // 1.0
+    // 3. 화면 좌표로 변환
+    const screenAspectRatio = screenWidth / screenHeight;
+    const frameAspectRatio = frameWidth / frameHeight;
 
-  let correctionX = 1;
-  let correctionY = 1;
-  if (frameAspectRatio > modelAspectRatio) {
-    // 원본 프레임이 모델 입력보다 넓음 -> Y축 좌표가 압축됨
-    correctionY = frameAspectRatio / modelAspectRatio;
-  } else {
-    // 원본 프레임이 모델 입력보다 높음 -> X축 좌표가 압축됨
-    correctionX = modelAspectRatio / frameAspectRatio;
-  }
+    let displayWidth, displayHeight, offsetX, offsetY;
+    if (frameAspectRatio > screenAspectRatio) {
+      // 프레임이 화면보다 넓은 경우
+      displayWidth = screenWidth;
+      displayHeight = screenWidth / frameAspectRatio;
+      offsetX = 0;
+      offsetY = (screenHeight - displayHeight) / 2;
+    } else {
+      // 프레임이 화면보다 높은 경우
+      displayWidth = screenHeight * frameAspectRatio;
+      displayHeight = screenHeight;
+      offsetX = (screenWidth - displayWidth) / 2;
+      offsetY = 0;
+    }
 
-  // console.log('PoseOverlay 렌더링:', {
-  //   posesLength: poses.length,
-  //   displayWidth,
-  //   displayHeight,
-  //   offsetX,
-  //   offsetY,
-  //   correctionX,
-  //   correctionY,
-  // });
+    const screenX = (modelX / frameWidth) * displayWidth + offsetX;
+    const screenY = (modelY / frameHeight) * displayHeight + offsetY;
 
-  if (poses.length === 0) {
-    return null;
-  }
-
-  // 3. 좌표 변환 함수
-  // 모델 좌표를 화면 좌표로 변환합니다.
-  const transformX = (x: number) => x * correctionX * displayWidth + offsetX;
-  const transformY = (y: number) => y * correctionY * displayHeight + offsetY;
+    return { x: screenX, y: screenY };
+  };
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
@@ -389,8 +402,11 @@ const PoseOverlay = ({
           <React.Fragment key={`pose-${poseIndex}`}>
             {/* 키포인트 렌더링 */}
             {pose.keypoints.map((keypoint, keypointIndex) => {
-              const screenX = transformX(keypoint.x);
-              const screenY = transformY(keypoint.y);
+              const { x: screenX, y: screenY } = transformCoordinates(
+                keypoint.x,
+                keypoint.y,
+                true,
+              );
               return (
                 <StaticKeypoint
                   key={`kp-${poseIndex}-${keypointIndex}`}
@@ -401,22 +417,24 @@ const PoseOverlay = ({
             })}
 
             {/* 바운딩 박스 렌더링 */}
-            <StaticBoundingBox
-              bbox={{
-                xmin: transformX(pose.bbox.xmin),
-                ymin: transformY(pose.bbox.ymin),
-                xmax: transformX(pose.bbox.xmax),
-                ymax: transformY(pose.bbox.ymax),
-              }}
-            />
+            {(() => {
+              const { x: xmin, y: ymin } = transformCoordinates(
+                pose.bbox.xmin,
+                pose.bbox.ymin,
+              );
+              const { x: xmax, y: ymax } = transformCoordinates(
+                pose.bbox.xmax,
+                pose.bbox.ymax,
+              );
+              return <StaticBoundingBox bbox={{ xmin, ymin, xmax, ymax }} />;
+            })()}
 
             {/* 회전된 박스 렌더링 */}
             {pose.rotatedBbox && (
               <StaticRotatedBox
-                corners={pose.rotatedBbox.corners.map(corner => ({
-                  x: transformX(corner.x),
-                  y: transformY(corner.y),
-                }))}
+                corners={pose.rotatedBbox.corners.map(corner =>
+                  transformCoordinates(corner.x, corner.y),
+                )}
               />
             )}
           </React.Fragment>
@@ -437,6 +455,7 @@ export default function App() {
   const [commTime, setCommTime] = useState<number>(0);
   const [bestIdx, setBestIdx] = useState<number>(-1);
   const [maxScore, setMaxScore] = useState<number>(-1);
+  const [preprocessScale, setPreprocessScale] = useState<number>(1);
 
   // SharedValue 대신 일반 state 사용
   const [detectedPoses, setDetectedPoses] = useState<Pose[]>([]);
@@ -484,6 +503,7 @@ export default function App() {
       originalHeight: number,
       startTime: number,
       preProcessEndTime: number,
+      preprocessScale: number,
     ) => {
       const jsThreadStartTime = Date.now();
       if (model == null) {
@@ -492,9 +512,9 @@ export default function App() {
       }
 
       try {
-        // 워크릿 종료 시점과 JS 스레드 시작 시점의 차이를 계산
         setCommTime(jsThreadStartTime - preProcessEndTime);
         setPreProcessTime(preProcessEndTime - startTime);
+        setPreprocessScale(preprocessScale);
 
         const frameData = new Float32Array(frameDataAsArray);
 
@@ -503,27 +523,42 @@ export default function App() {
         const modelEndTime = Date.now();
         setModelRunTime(modelEndTime - modelStartTime);
 
+        // 출력 검증 로그 추가
+        console.log('Model output type:', typeof output);
+        console.log('Model output is array:', Array.isArray(output));
+        console.log('Model output length:', output?.length);
+        console.log('Model output structure:', {
+          isArray: Array.isArray(output),
+          length: output?.length,
+          firstElementType: output?.[0]?.constructor?.name,
+          secondElementType: output?.[1]?.constructor?.name,
+        });
+        // if output is not array then return
+        if (!Array.isArray(output)) {
+          isProcessing.value = false;
+          return;
+        }
+
         const postProcessStartTime = modelEndTime;
         const {
           poses,
           bestIdx: newBestIdx,
           maxScore: newMaxScore,
-        } = processOutput(output);
+        } = processOutput(output, preprocessScale);
         const postProcessEndTime = Date.now();
         setPostProcessTime(postProcessEndTime - postProcessStartTime);
 
         setTimer(postProcessEndTime - startTime);
 
-        // console.log('*************poseCameOut*************');
-        // console.log(JSON.stringify(poses));
-        // console.log('*************poseCameOut*************');
-
-        // SharedValue 대신 setState 사용
         setDetectedPoses(poses);
         setBestIdx(newBestIdx);
         setMaxScore(newMaxScore);
       } catch (e) {
         console.error('TFLite 추론 오류:', e);
+        console.error(
+          'Error stack:',
+          e instanceof Error ? e.stack : 'No stack trace',
+        );
       } finally {
         isProcessing.value = false;
       }
@@ -531,6 +566,7 @@ export default function App() {
     [model],
   );
 
+  // 파이썬과 동일한 전처리 로직으로 수정
   const frameProcessor = useFrameProcessor(
     (frame: Frame) => {
       'worklet';
@@ -541,7 +577,6 @@ export default function App() {
 
       const now = Date.now();
       if (now - lastInferenceTime.current < 1000) {
-        // 1초마다 처리로 변경
         return;
       }
       lastInferenceTime.current = now;
@@ -552,10 +587,19 @@ export default function App() {
         const targetW = MODEL_INPUT_WIDTH;
         const targetH = MODEL_INPUT_HEIGHT;
 
+        // 파이썬과 동일한 스케일 계산
         const scale = Math.min(targetW / frame.width, targetH / frame.height);
         const resizedW = Math.floor(frame.width * scale);
         const resizedH = Math.floor(frame.height * scale);
 
+        console.log('Python-style preprocessing:', {
+          originalFrame: `${frame.width}x${frame.height}`,
+          targetSize: `${targetW}x${targetH}`,
+          scale: scale.toFixed(3),
+          resizedSize: `${resizedW}x${resizedH}`,
+        });
+
+        // 리사이즈
         const resized = resize(frame, {
           scale: {
             width: resizedW,
@@ -565,18 +609,22 @@ export default function App() {
           dataType: 'uint8',
         });
 
+        // 파이썬처럼 zero padding으로 224x224 텐서 생성
         const inputTensor = new Uint8Array(targetW * targetH * 3);
 
+        // 리사이즈된 이미지를 좌상단부터 배치 (파이썬과 동일)
         for (let y = 0; y < resizedH; y++) {
           for (let x = 0; x < resizedW; x++) {
             const srcIdx = (y * resizedW + x) * 3;
             const dstIdx = (y * targetW + x) * 3;
+
             inputTensor[dstIdx] = resized[srcIdx];
             inputTensor[dstIdx + 1] = resized[srcIdx + 1];
             inputTensor[dstIdx + 2] = resized[srcIdx + 2];
           }
         }
 
+        // 정규화 (파이썬과 동일)
         const normalizedTensor = new Float32Array(targetW * targetH * 3);
         for (let i = 0; i < inputTensor.length; i++) {
           normalizedTensor[i] = inputTensor[i] / 127.5 - 1.0;
@@ -590,6 +638,7 @@ export default function App() {
           frame.height,
           startTime,
           preProcessEndTime,
+          scale,
         );
       } catch (e) {
         const errorMessage =
@@ -632,6 +681,7 @@ export default function App() {
         poses={detectedPoses}
         frameWidth={frameWidth}
         frameHeight={frameHeight}
+        preprocessScale={preprocessScale}
       />
 
       <View style={styles.infoBox}>
@@ -649,6 +699,9 @@ export default function App() {
         )}
         <Text style={styles.infoText}>
           Frame: {frameWidth}x{frameHeight}
+        </Text>
+        <Text style={styles.infoText}>
+          Preprocess Scale: {preprocessScale.toFixed(3)}
         </Text>
         <Text style={styles.infoText}>Total Time: {timer}ms</Text>
         <Text style={styles.infoText}>
